@@ -17,10 +17,11 @@ tw_load_conf() {
   fi
   # shellcheck disable=SC1090
   source "$CONF"
-  FAIL_THRESHOLD="${FAIL_THRESHOLD:-3}"
-  COOLDOWN_SEC="${COOLDOWN_SEC:-120}"
+  FAIL_THRESHOLD="${FAIL_THRESHOLD:-5}"
+  COOLDOWN_SEC="${COOLDOWN_SEC:-300}"
+  GRACE_SEC="${GRACE_SEC:-300}"
   JOURNAL_LOOKBACK="${JOURNAL_LOOKBACK:-10min}"
-  CONTROL_JOURNAL_SINCE="${CONTROL_JOURNAL_SINCE:-5 min ago}"
+  CONTROL_JOURNAL_SINCE="${CONTROL_JOURNAL_SINCE:-3 min ago}"
   mkdir -p "$STATE_DIR" 2>/dev/null || true
 }
 
@@ -112,28 +113,28 @@ remote_estab_ok() {
   remote_estab_count "$1" >/dev/null
 }
 
-# Parse port[:min] — default min=3
-# Dead tunnels usually leave 0-2 zombie CF ESTAB; healthy pool is much higher.
+# Parse port[:dead_below]
+# FAIL only when ESTAB < dead_below (default 2). Transient CF "bad handshake"
+# while pool still has sockets must NOT mark the tunnel dead.
 parse_port_min() {
   local arg="$1"
   _cc_port="${arg%%:*}"
   if [[ "$arg" == *:* ]]; then
     _cc_min="${arg#*:}"
   else
-    _cc_min=3
+    _cc_min=2
   fi
-  [[ -n "$_cc_min" ]] || _cc_min=3
+  [[ -n "$_cc_min" ]] || _cc_min=2
 }
 
 _cc_journal_since() {
-  # Only recent logs — never punish forever for an old bad handshake.
-  echo "${CONTROL_JOURNAL_SINCE:-5 min ago}"
+  echo "${CONTROL_JOURNAL_SINCE:-3 min ago}"
 }
 
 _cc_relevant_last() {
   local unit="$1"
   journalctl -u "$unit" --since "$(_cc_journal_since)" --no-pager -o cat 2>/dev/null \
-    | grep -iE 'control channel established successfully|attempting to establish a new .+ control channel|failed to read from channel|bad handshake|connection reset by peer|waiting for .+ control channel' \
+    | grep -iE 'control channel established successfully|failed to read from channel|bad handshake|connection reset by peer' \
     | tail -1 || true
 }
 
@@ -141,17 +142,29 @@ _cc_is_success() {
   echo "$1" | grep -qi 'control channel established successfully'
 }
 
-_cc_is_failure() {
-  local line="$1"
-  echo "$line" | grep -qiE 'bad handshake|failed to read from channel|connection reset by peer|waiting for' \
-    && ! _cc_is_success "$line"
+# Seconds since unit entered active state (huge number if unknown)
+unit_active_age_sec() {
+  local unit="$1" ts now
+  ts="$(systemctl show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
+  if [[ -z "$ts" || "$ts" == "n/a" ]]; then
+    echo 999999
+    return
+  fi
+  now="$(date +%s)"
+  # systemd timestamp like "Fri 2026-07-17 04:53:57 UTC"
+  local epoch
+  epoch="$(date -d "$ts" +%s 2>/dev/null || echo 0)"
+  if [[ "$epoch" -le 0 ]]; then
+    echo 999999
+    return
+  fi
+  echo $((now - epoch))
 }
 
-# Client-mode liveness with hysteresis:
-#  - ESTAB < 2            => FAIL (zombie / cut)
-#  - recent journal FAIL  => FAIL (even if a few sockets linger)
-#  - recent journal OK    => OK if ESTAB >= 2
-#  - no recent journal    => OK only if ESTAB >= min (healthy pool), else FAIL
+# Client liveness — conservative across topologies:
+#  OK  if ESTAB >= dead_below (default 2), OR recent "control channel established"
+#  FAIL only if ESTAB < dead_below AND no recent establish success
+# Never FAIL solely because of a transient bad-handshake while sockets remain.
 control_channel_ok() {
   local unit="$1" arg="$2"
   local cnt last
@@ -159,30 +172,26 @@ control_channel_ok() {
   cnt="$(unit_estab_count "$unit" "$_cc_port")"
   last="$(_cc_relevant_last "$unit")"
 
-  if [[ "${cnt:-0}" -lt 2 ]]; then
-    return 1
-  fi
-
-  if [[ -n "$last" ]] && _cc_is_failure "$last"; then
-    return 1
-  fi
-
   if [[ -n "$last" ]] && _cc_is_success "$last"; then
     return 0
   fi
 
-  # Silent window: trust pool size only
-  [[ "${cnt:-0}" -ge "$_cc_min" ]]
+  if [[ "${cnt:-0}" -ge "$_cc_min" ]]; then
+    return 0
+  fi
+
+  return 1
 }
 
 control_channel_detail() {
   local unit="$1" arg="$2"
-  local cnt last
+  local cnt last age
   parse_port_min "$arg"
   cnt="$(unit_estab_count "$unit" "$_cc_port")"
   last="$(_cc_relevant_last "$unit")"
-  last="$(echo "$last" | sed -E 's/\x1b\[[0-9;]*m//g' | tr -s ' ' | cut -c1-100)"
-  echo "ESTAB=${cnt} min=${_cc_min} port=:${_cc_port}; journal(${CONTROL_JOURNAL_SINCE:-5m})=${last:-none}"
+  age="$(unit_active_age_sec "$unit")"
+  last="$(echo "$last" | sed -E 's/\x1b\[[0-9;]*m//g' | tr -s ' ' | cut -c1-90)"
+  echo "ESTAB=${cnt} need>=${_cc_min} port=:${_cc_port} age=${age}s; journal=${last:-none}"
 }
 
 iface_up() {

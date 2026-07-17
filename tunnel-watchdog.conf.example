@@ -1,26 +1,21 @@
 # Tunnel Watchdog config
-# Format of each TUNNELS line: name|systemd_unit|check_type|check_arg
+# Format: name|systemd_unit|check_type|check_arg
 #
-# Recommended for Backhaul/Backpack clients:
-#   control_channel|remote_port:min_estab
-#   e.g. 8080:3
+# Recommended (Backhaul/Backpack clients):
+#   control_channel|REMOTE_PORT:DEAD_BELOW
+#   e.g. 8080:2
 #
-# Logic (control_channel):
-#   ESTAB < 2                         -> FAIL
-#   recent journal failure            -> FAIL
-#   recent journal success + ESTAB>=2 -> OK
-#   no recent journal + ESTAB>=min    -> OK
+# FAIL only when ESTAB < DEAD_BELOW (and no recent "control channel established").
+# Transient bad-handshake while sockets remain does NOT force restart.
 #
-# Other check types: remote_estab, tcp, port, ping, iface, backhaul_full, active
-#
-# Manage interactively: tunnel-menu
-
-FAIL_THRESHOLD=3
-COOLDOWN_SEC=120
+# Safety knobs:
+FAIL_THRESHOLD=5
+COOLDOWN_SEC=300
+GRACE_SEC=300
 JOURNAL_LOOKBACK=15min
-CONTROL_JOURNAL_SINCE="5 min ago"
+CONTROL_JOURNAL_SINCE="3 min ago"
 
 TUNNELS="
-# backhaul-example|backhaul-kharej8080.service|control_channel|8080:3
-# backpack-example|backpack-client-2082.service|control_channel|2082:3
+# backhaul-example|backhaul-kharej8080.service|control_channel|8080:2
+# backpack-example|backpack-client-2082.service|control_channel|2082:2
 "

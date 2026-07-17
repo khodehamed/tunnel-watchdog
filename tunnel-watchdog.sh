@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Tunnel watchdog — real connectivity checks, then systemctl restart.
+# Tunnel watchdog — conservative restarts only when tunnel is really dead.
 set -euo pipefail
 
 LIB="${TUNNEL_LIB:-/usr/local/lib/tunnel-watchdog/tunnel-lib.sh}"
-# fallback for local/dev path next to this script
 if [[ ! -f "$LIB" ]]; then
   LIB="$(cd "$(dirname "$0")" && pwd)/tunnel-lib.sh"
 fi
@@ -42,10 +41,28 @@ in_cooldown() {
 
 mark_cooldown() { date +%s > "$(cooldown_path "$1")" ; }
 
+# Skip FAIL/restart while unit is still warming up after start/restart
+in_grace() {
+  local unit="$1" age
+  age="$(unit_active_age_sec "$unit")"
+  (( age < GRACE_SEC ))
+}
+
+is_ignored_unit() {
+  local unit="$1"
+  # Never touch web panels / non-tunnel helpers
+  echo "$unit" | grep -qiE 'webui|watchdog' && return 0
+  return 1
+}
+
 do_restart() {
   local name="$1" unit="$2"
   if in_cooldown "$unit"; then
     log "SKIP restart $name ($unit): cooldown ${COOLDOWN_SEC}s"
+    return 0
+  fi
+  if in_grace "$unit"; then
+    log "SKIP restart $name ($unit): still in grace ${GRACE_SEC}s"
     return 0
   fi
   log "RESTART $name -> systemctl restart $unit"
@@ -54,26 +71,31 @@ do_restart() {
   clear_fails "$unit"
   sleep 3
   if service_active "$unit"; then
-    log "OK $unit active after restart (health will re-check next ticks)"
+    log "OK $unit active after restart (grace ${GRACE_SEC}s starts now)"
   else
     log "FAIL $unit not active after restart"
   fi
 }
 
 handle_result() {
-  local name="$1" unit="$2" kind="$3" arg="$4" healthy="$5"
+  local name="$1" unit="$2" kind="$3" arg="$4" healthy="$5" reason="${6:-}"
   local fails
 
   if [[ "$healthy" -eq 1 ]]; then
     clear_fails "$unit"
-    log "OK: $name ($unit) check=$kind"
+    log "OK: $name ($unit) check=$kind ${reason}"
+    return 0
+  fi
+
+  if in_grace "$unit"; then
+    log "GRACE: $name ($unit) unhealthy but age<${GRACE_SEC}s — not counting ($reason)"
     return 0
   fi
 
   fails="$(get_fails "$unit")"
   fails=$((fails + 1))
   set_fails "$unit" "$fails"
-  log "FAIL($fails/$FAIL_THRESHOLD): $name ($unit) check=$kind arg=$arg"
+  log "FAIL($fails/$FAIL_THRESHOLD): $name ($unit) check=$kind arg=$arg — $reason"
 
   if (( fails >= FAIL_THRESHOLD )); then
     do_restart "$name" "$unit"
@@ -93,19 +115,24 @@ check_one() {
   [[ -z "$name" || -z "$unit" ]] && return 0
   [[ "$name" =~ ^# ]] && return 0
 
+  if is_ignored_unit "$unit"; then
+    log "SKIP: $name ($unit) ignored (webui/watchdog)"
+    return 0
+  fi
+
   if evaluate_tunnel "$name" "$unit" "$kind" "$arg"; then
     healthy=1
   else
     healthy=0
-    if [[ "$HEALTH_REASON" == *"systemd"* ]] || [[ "$HEALTH_REASON" == *"inactive"* ]]; then
-      log "DOWN: $name ($unit) $HEALTH_REASON"
-    fi
   fi
-  handle_result "$name" "$unit" "$kind" "$arg" "$healthy"
+  handle_result "$name" "$unit" "$kind" "$arg" "$healthy" "$HEALTH_REASON"
 }
 
 main() {
   tw_load_conf || exit 1
+  FAIL_THRESHOLD="${FAIL_THRESHOLD:-5}"
+  COOLDOWN_SEC="${COOLDOWN_SEC:-300}"
+  GRACE_SEC="${GRACE_SEC:-300}"
   if [[ -z "${TUNNELS:-}" ]]; then
     log "ERROR: TUNNELS empty in $CONF"
     exit 1
