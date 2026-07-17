@@ -21,7 +21,9 @@ tw_load_conf() {
   COOLDOWN_SEC="${COOLDOWN_SEC:-300}"
   GRACE_SEC="${GRACE_SEC:-300}"
   JOURNAL_LOOKBACK="${JOURNAL_LOOKBACK:-10min}"
-  CONTROL_JOURNAL_SINCE="${CONTROL_JOURNAL_SINCE:-3 min ago}"
+  CONTROL_JOURNAL_SINCE="${CONTROL_JOURNAL_SINCE:-5 min ago}"
+  CONTROL_ESTAB_MIN="${CONTROL_ESTAB_MIN:-4}"
+  CONTROL_FRESH_MS="${CONTROL_FRESH_MS:-120000}"
   mkdir -p "$STATE_DIR" 2>/dev/null || true
 }
 
@@ -113,33 +115,92 @@ remote_estab_ok() {
   remote_estab_count "$1" >/dev/null
 }
 
-# Parse port[:dead_below]
-# FAIL only when ESTAB < dead_below (default 2). Transient CF "bad handshake"
-# while pool still has sockets must NOT mark the tunnel dead.
+# Parse port[:healthy_min]
+# Default healthy_min=4 — 1–2 leftover CF sockets must NOT count as healthy.
 parse_port_min() {
   local arg="$1"
   _cc_port="${arg%%:*}"
   if [[ "$arg" == *:* ]]; then
     _cc_min="${arg#*:}"
   else
-    _cc_min=2
+    _cc_min="${CONTROL_ESTAB_MIN:-4}"
   fi
-  [[ -n "$_cc_min" ]] || _cc_min=2
+  [[ -n "$_cc_min" ]] || _cc_min="${CONTROL_ESTAB_MIN:-4}"
 }
 
 _cc_journal_since() {
-  echo "${CONTROL_JOURNAL_SINCE:-3 min ago}"
+  echo "${CONTROL_JOURNAL_SINCE:-5 min ago}"
 }
 
 _cc_relevant_last() {
   local unit="$1"
   journalctl -u "$unit" --since "$(_cc_journal_since)" --no-pager -o cat 2>/dev/null \
-    | grep -iE 'control channel established successfully|failed to read from channel|bad handshake|connection reset by peer' \
+    | grep -iE 'control channel established successfully|failed to read from channel|bad handshake|connection reset by peer|attempting to establish a new .+ control channel' \
     | tail -1 || true
 }
 
 _cc_is_success() {
   echo "$1" | grep -qi 'control channel established successfully'
+}
+
+_cc_is_failure() {
+  echo "$1" | grep -qiE 'failed to read from channel|bad handshake|connection reset by peer'
+}
+
+# ExecStart -c path for a unit (toml/config), if any
+unit_config_path() {
+  local unit="$1"
+  systemctl show "$unit" -p ExecStart --value 2>/dev/null \
+    | grep -oE '\-c[[:space:]]+[^[:space:]]+' | awk '{print $2}' | head -1 || true
+}
+
+# tun_name from backhaul/backpack toml (empty if unset / not tun mode)
+unit_tun_name() {
+  local unit="$1" conf
+  conf="$(unit_config_path "$unit")"
+  [[ -n "$conf" && -f "$conf" ]] || { echo ""; return 0; }
+  grep -E '^\s*tun_name\s*=' "$conf" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/^[^=]+=[[:space:]]*"?([^"#]+)"?.*/\1/' \
+    | xargs || true
+}
+
+tun_iface_up() {
+  local iface="$1"
+  [[ -n "$iface" ]] || return 1
+  [[ -d "/sys/class/net/$iface" ]] || return 1
+  local st
+  st="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null || echo down)"
+  [[ "$st" == "up" || "$st" == "unknown" ]]
+}
+
+# Count ESTAB sockets to port whose lastrcv is fresher than FRESH_MS (default 120s).
+# All-stale pools (zombie CF) must not count as healthy.
+unit_fresh_estab_count() {
+  local unit="$1" port="$2"
+  local pid fresh_ms
+  fresh_ms="${CONTROL_FRESH_MS:-120000}"
+  pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || echo 0)"
+  if [[ -z "$pid" || "$pid" == "0" ]]; then
+    echo "0"
+    return 1
+  fi
+  ss -tiepm state established 2>/dev/null | awk -v pid="$pid" -v port="$port" -v fresh="$fresh_ms" '
+    BEGIN { n=0; keep=0 }
+    {
+      if ($0 ~ ("pid=" pid ",") && $0 ~ (":" port)) { keep=1; next }
+      if (keep) {
+        if (match($0, /lastrcv:[0-9]+/)) {
+          split(substr($0, RSTART, RLENGTH), a, ":")
+          if (a[2]+0 <= fresh+0) n++
+        }
+        # end this socket block on next non-indented header-ish line or after info
+        if ($0 ~ /^[0-9]/ || $0 ~ /^ESTAB/ || $0 ~ /^tcp/) keep=0
+        else if (match($0, /lastrcv:[0-9]+/)) keep=0
+      }
+    }
+    END { print n+0 }
+  '
 }
 
 # Seconds since unit entered active state (huge number if unknown)
@@ -161,22 +222,39 @@ unit_active_age_sec() {
   echo $((now - epoch))
 }
 
-# Client liveness — conservative across topologies:
-#  OK  if ESTAB >= dead_below (default 2), OR recent "control channel established"
-#  FAIL only if ESTAB < dead_below AND no recent establish success
-# Never FAIL solely because of a transient bad-handshake while sockets remain.
+# Client liveness (Backhaul/Backpack):
+#  1) If toml has tun_name → that iface MUST exist/up (zombie CF ESTAB is not enough)
+#  2) Recent journal "control channel established" → OK (warmup / reconnect)
+#  3) Else need ESTAB >= healthy_min (default 4) AND at least one fresh socket
+#     (lastrcv within CONTROL_FRESH_MS). Pure stale ESTAB pool → FAIL.
+# Never FAIL solely on a transient bad-handshake while fresh sockets + tun (if any) are OK.
 control_channel_ok() {
   local unit="$1" arg="$2"
-  local cnt last
+  local cnt fresh last tun
   parse_port_min "$arg"
   cnt="$(unit_estab_count "$unit" "$_cc_port")"
+  fresh="$(unit_fresh_estab_count "$unit" "$_cc_port")"
   last="$(_cc_relevant_last "$unit")"
+  tun="$(unit_tun_name "$unit")"
+
+  # TUN mode: missing/down iface means tunnel is dead even with many CF ESTAB.
+  if [[ -n "$tun" ]]; then
+    if ! tun_iface_up "$tun"; then
+      return 1
+    fi
+  fi
+
+  # Last journal line in window is an unrecovered failure → dead
+  if [[ -n "$last" ]] && _cc_is_failure "$last"; then
+    return 1
+  fi
 
   if [[ -n "$last" ]] && _cc_is_success "$last"; then
     return 0
   fi
 
-  if [[ "${cnt:-0}" -ge "$_cc_min" ]]; then
+  # Healthy pool: enough ESTAB and at least one recently active socket
+  if [[ "${cnt:-0}" -ge "$_cc_min" && "${fresh:-0}" -ge 1 ]]; then
     return 0
   fi
 
@@ -185,13 +263,23 @@ control_channel_ok() {
 
 control_channel_detail() {
   local unit="$1" arg="$2"
-  local cnt last age
+  local cnt fresh last age tun tun_st
   parse_port_min "$arg"
   cnt="$(unit_estab_count "$unit" "$_cc_port")"
+  fresh="$(unit_fresh_estab_count "$unit" "$_cc_port")"
   last="$(_cc_relevant_last "$unit")"
   age="$(unit_active_age_sec "$unit")"
-  last="$(echo "$last" | sed -E 's/\x1b\[[0-9;]*m//g' | tr -s ' ' | cut -c1-90)"
-  echo "ESTAB=${cnt} need>=${_cc_min} port=:${_cc_port} age=${age}s; journal=${last:-none}"
+  tun="$(unit_tun_name "$unit")"
+  tun_st="n/a"
+  if [[ -n "$tun" ]]; then
+    if tun_iface_up "$tun"; then
+      tun_st="up:${tun}"
+    else
+      tun_st="MISSING:${tun}"
+    fi
+  fi
+  last="$(echo "$last" | sed -E 's/\x1b\[[0-9;]*m//g' | tr -s ' ' | cut -c1-70)"
+  echo "ESTAB=${cnt} fresh=${fresh} need>=${_cc_min} port=:${_cc_port} tun=${tun_st} age=${age}s; journal=${last:-none}"
 }
 
 iface_up() {
@@ -448,7 +536,7 @@ tw_ensure_conf() {
     echo "COOLDOWN_SEC=300"
     echo "GRACE_SEC=300"
     echo "JOURNAL_LOOKBACK=15min"
-    echo 'CONTROL_JOURNAL_SINCE="3 min ago"'
+    echo 'CONTROL_JOURNAL_SINCE="5 min ago"'
     echo
     echo 'TUNNELS="'
     echo '"'
@@ -484,7 +572,7 @@ tw_guess_entry_for_unit() {
   fi
 
   if [[ -n "$port" ]]; then
-    echo "${name}|${u}|control_channel|${port}:2"
+    echo "${name}|${u}|control_channel|${port}:4"
   else
     echo "${name}|${u}|active|"
   fi

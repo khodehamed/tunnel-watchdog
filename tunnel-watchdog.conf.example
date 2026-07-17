@@ -2,20 +2,23 @@
 # Format: name|systemd_unit|check_type|check_arg
 #
 # Recommended (Backhaul/Backpack clients):
-#   control_channel|REMOTE_PORT:DEAD_BELOW
-#   e.g. 8080:2
+#   control_channel|REMOTE_PORT:HEALTHY_MIN_ESTAB
+#   e.g. 8080:4
 #
-# FAIL only when ESTAB < DEAD_BELOW (and no recent "control channel established").
-# Transient bad-handshake while sockets remain does NOT force restart.
+# Health rules (control_channel):
+#   - If unit toml has tun_name → that iface must be UP (CF ESTAB alone is not enough)
+#   - Recent "control channel established" in journal → OK
+#   - Else need ESTAB >= HEALTHY_MIN (default 4) AND at least one fresh socket
+#   - 1–2 leftover zombie sockets must NOT count as healthy
 #
 # Safety knobs:
 FAIL_THRESHOLD=5
 COOLDOWN_SEC=300
 GRACE_SEC=300
 JOURNAL_LOOKBACK=15min
-CONTROL_JOURNAL_SINCE="3 min ago"
+CONTROL_JOURNAL_SINCE="5 min ago"
 
 TUNNELS="
-# backhaul-example|backhaul-kharej8080.service|control_channel|8080:2
-# backpack-example|backpack-client-2082.service|control_channel|2082:2
+# backhaul-example|backhaul-kharej8080.service|control_channel|8080:4
+# backpack-example|backpack-client-2082.service|control_channel|2082:4
 "

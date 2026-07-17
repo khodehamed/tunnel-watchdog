@@ -2,7 +2,7 @@
 
 Watchdog + English menu for **Backhaul / Backpack** (and similar) systemd tunnels.
 
-Checks real tunnel liveness (`control_channel`: ESTAB pool + recent journal), not just `systemctl is-active`. Restarts unhealthy units via a systemd timer.
+Checks real tunnel liveness (`control_channel`: TUN iface if configured, fresh ESTAB pool, journal), not just `systemctl is-active`. Restarts unhealthy units via a systemd timer.
 
 ## Install (one line)
 

@@ -80,7 +80,7 @@ auto_detect_tunnels() {
           fi
         fi
         if [[ -n "$port" ]]; then
-          echo "${name}|${u}|control_channel|${port}:2"
+          echo "${name}|${u}|control_channel|${port}:4"
         else
           echo "${name}|${u}|active|"
         fi
@@ -97,12 +97,12 @@ upgrade_conf_knobs() {
     /^FAIL_THRESHOLD=/ { print "FAIL_THRESHOLD=5"; done_fail=1; next }
     /^COOLDOWN_SEC=/ { print "COOLDOWN_SEC=300"; done_cool=1; next }
     /^GRACE_SEC=/ { print "GRACE_SEC=300"; done_grace=1; next }
-    /^CONTROL_JOURNAL_SINCE=/ { print "CONTROL_JOURNAL_SINCE=\"3 min ago\""; done_j=1; next }
+    /^CONTROL_JOURNAL_SINCE=/ { print "CONTROL_JOURNAL_SINCE=\"5 min ago\""; done_j=1; next }
     /^TUNNELS=/ {
       if (!done_fail) print "FAIL_THRESHOLD=5"
       if (!done_cool) print "COOLDOWN_SEC=300"
       if (!done_grace) print "GRACE_SEC=300"
-      if (!done_j) print "CONTROL_JOURNAL_SINCE=\"3 min ago\""
+      if (!done_j) print "CONTROL_JOURNAL_SINCE=\"5 min ago\""
       print
       next
     }
@@ -112,8 +112,8 @@ upgrade_conf_knobs() {
     }
   ' "$f" >"$tmp"
 
-  # Normalize old aggressive :3 mins to :2 in TUNNELS lines
-  sed -E 's/\|control_channel\|([0-9]+):3$/|control_channel|\1:2/' "$tmp" >"${tmp}.2"
+  # Bump legacy low ESTAB floors (:2/:3) to :4 — zombie CF sockets fooled :2
+  sed -E 's/\|control_channel\|([0-9]+):[23]$/|control_channel|\1:4/' "$tmp" >"${tmp}.2"
   # Drop webui lines if any
   grep -viE 'webui' "${tmp}.2" >"$tmp" || true
   install -m 0644 "$tmp" "$f"
@@ -129,14 +129,14 @@ if [[ ! -f "$CONF" ]]; then
     echo "COOLDOWN_SEC=300"
     echo "GRACE_SEC=300"
     echo "JOURNAL_LOOKBACK=15min"
-    echo 'CONTROL_JOURNAL_SINCE="3 min ago"'
+    echo 'CONTROL_JOURNAL_SINCE="5 min ago"'
     echo
     echo "TUNNELS=\""
     detected="$(auto_detect_tunnels || true)"
     if [[ -n "${detected:-}" ]]; then
       echo "$detected"
     else
-      echo "# example|backhaul-xxx.service|control_channel|8080:2"
+      echo "# example|backhaul-xxx.service|control_channel|8080:4"
     fi
     echo '"'
   } >"$CONF"
