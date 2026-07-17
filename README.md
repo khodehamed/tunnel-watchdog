@@ -7,7 +7,7 @@ Checks real tunnel liveness (`control_channel`: ESTAB pool + recent journal), no
 ## Install (one line)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/7gozar/tunnel-watchdog/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/khodehamed/tunnel-watchdog/main/install.sh | sudo bash
 ```
 
 ## After install

@@ -2,12 +2,12 @@
 # Install tunnel-watchdog (idempotent).
 #
 # One-liner (replace USER if needed):
-#   curl -fsSL https://raw.githubusercontent.com/USER/tunnel-watchdog/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/khodehamed/tunnel-watchdog/main/install.sh | sudo bash
 #
 set -euo pipefail
 
-# Overridable: TUNNEL_WATCHDOG_RAW=https://raw.githubusercontent.com/USER/tunnel-watchdog/main
-DEFAULT_RAW="https://raw.githubusercontent.com/7gozar/tunnel-watchdog/main"
+# Overridable: TUNNEL_WATCHDOG_RAW=https://raw.githubusercontent.com/khodehamed/tunnel-watchdog/main
+DEFAULT_RAW="https://raw.githubusercontent.com/khodehamed/tunnel-watchdog/main"
 RAW_BASE="${TUNNEL_WATCHDOG_RAW:-$DEFAULT_RAW}"
 
 LIB_DIR="/usr/local/lib/tunnel-watchdog"
