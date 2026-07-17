@@ -19,6 +19,14 @@ If the menu does not open (rare under `curl|sudo bash`), use the two-step form (
 curl -fsSL https://raw.githubusercontent.com/khodehamed/tunnel-watchdog/main/install.sh -o /tmp/tw-install.sh && sudo bash /tmp/tw-install.sh
 ```
 
+## Uninstall (one line)
+
+Removes watchdog only — does **not** touch backhaul/backpack tunnel services.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/khodehamed/tunnel-watchdog/main/uninstall.sh -o /tmp/tw-uninstall.sh && sudo bash /tmp/tw-uninstall.sh
+```
+
 ## After install
 
 ```bash
