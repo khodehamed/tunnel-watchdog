@@ -222,27 +222,48 @@ unit_active_age_sec() {
   echo $((now - epoch))
 }
 
+# Skip-TUN state: some builds list tun_name in toml but never create a kernel iface.
+# File stores ActiveEnterTimestamp; mismatch ⇒ new process ⇒ re-validate.
+_cc_tun_skip_path() {
+  local unit="$1"
+  local key
+  key="$(echo "$unit" | tr -c 'A-Za-z0-9._-' '_')"
+  echo "${STATE_DIR}/skip_tun.${key}"
+}
+
+_cc_tun_skip_active() {
+  local unit="$1" f ts
+  f="$(_cc_tun_skip_path "$unit")"
+  [[ -f "$f" ]] || return 1
+  ts="$(systemctl show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
+  [[ -n "$ts" && "$(cat "$f" 2>/dev/null)" == "$ts" ]]
+}
+
+_cc_tun_skip_mark() {
+  local unit="$1" ts
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  ts="$(systemctl show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null || true)"
+  [[ -n "$ts" ]] || return 0
+  echo "$ts" >"$(_cc_tun_skip_path "$unit")"
+}
+
 # Client liveness (Backhaul/Backpack):
-#  1) If toml has tun_name → that iface MUST exist/up (zombie CF ESTAB is not enough)
-#  2) Recent journal "control channel established" → OK (warmup / reconnect)
-#  3) Else need ESTAB >= healthy_min (default 4) AND at least one fresh socket
-#     (lastrcv within CONTROL_FRESH_MS). Pure stale ESTAB pool → FAIL.
-# Never FAIL solely on a transient bad-handshake while fresh sockets + tun (if any) are OK.
+#  1) Unrecovered journal failure → FAIL
+#  2) Recent "control channel established" → OK
+#  3) If toml has tun_name and iface is MISSING and there is NO recent success
+#     → FAIL even with many CF ESTAB (zombie pool). This is the main false-OK fix.
+#     After a successful session with no kernel TUN for ~90s, skip TUN for this
+#     process lifetime (some builds never create the iface).
+#  4) Else need ESTAB >= healthy_min (default 4) AND at least one fresh socket.
 control_channel_ok() {
   local unit="$1" arg="$2"
-  local cnt fresh last tun
+  local cnt fresh last tun age
   parse_port_min "$arg"
   cnt="$(unit_estab_count "$unit" "$_cc_port")"
   fresh="$(unit_fresh_estab_count "$unit" "$_cc_port")"
   last="$(_cc_relevant_last "$unit")"
   tun="$(unit_tun_name "$unit")"
-
-  # TUN mode: missing/down iface means tunnel is dead even with many CF ESTAB.
-  if [[ -n "$tun" ]]; then
-    if ! tun_iface_up "$tun"; then
-      return 1
-    fi
-  fi
+  age="$(unit_active_age_sec "$unit")"
 
   # Last journal line in window is an unrecovered failure → dead
   if [[ -n "$last" ]] && _cc_is_failure "$last"; then
@@ -250,7 +271,19 @@ control_channel_ok() {
   fi
 
   if [[ -n "$last" ]] && _cc_is_success "$last"; then
+    # Control is up. If tun_name is set but iface never appears, mark skip
+    # so we do not restart-loop after the journal window expires.
+    if [[ -n "$tun" ]] && ! tun_iface_up "$tun" && [[ "${age:-0}" -ge 90 ]]; then
+      _cc_tun_skip_mark "$unit"
+    fi
     return 0
+  fi
+
+  # No recent success in journal window.
+  # Missing TUN (when configured) means zombie CF ESTAB must NOT count as OK —
+  # unless this process already proved it never creates a kernel TUN.
+  if [[ -n "$tun" ]] && ! tun_iface_up "$tun" && ! _cc_tun_skip_active "$unit"; then
+    return 1
   fi
 
   # Healthy pool: enough ESTAB and at least one recently active socket
@@ -274,6 +307,8 @@ control_channel_detail() {
   if [[ -n "$tun" ]]; then
     if tun_iface_up "$tun"; then
       tun_st="up:${tun}"
+    elif _cc_tun_skip_active "$unit"; then
+      tun_st="skip:${tun}"
     else
       tun_st="MISSING:${tun}"
     fi

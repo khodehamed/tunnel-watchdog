@@ -6,8 +6,9 @@
 #   e.g. 8080:4
 #
 # Health rules (control_channel):
-#   - If unit toml has tun_name → that iface must be UP (CF ESTAB alone is not enough)
-#   - Recent "control channel established" in journal → OK
+#   - Recent "control channel established" → OK
+#   - If toml has tun_name and iface is missing and there is NO recent success
+#     → FAIL (zombie Cloudflare ESTAB alone is not enough)
 #   - Else need ESTAB >= HEALTHY_MIN (default 4) AND at least one fresh socket
 #   - 1–2 leftover zombie sockets must NOT count as healthy
 #
