@@ -160,3 +160,10 @@ echo "  tunnel-menu status    # live health"
 echo "  config: $CONF"
 echo
 tunnel-menu status 2>/dev/null || true
+
+# Open interactive menu after install (curl|bash has no TTY on stdin).
+# Skip for CI/automation: TUNNEL_WATCHDOG_NO_MENU=1
+if [[ "${TUNNEL_WATCHDOG_NO_MENU:-0}" != "1" ]] && [[ -r /dev/tty ]]; then
+  echo "Opening tunnel-menu..."
+  tunnel-menu </dev/tty >/dev/tty 2>&1 || true
+fi
