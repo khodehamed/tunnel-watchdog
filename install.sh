@@ -149,12 +149,21 @@ fi
 
 systemctl daemon-reload
 systemctl enable --now tunnel-watchdog.timer >/dev/null
+
+# After install/upgrade: clear fail streaks and open a settle window so we do not
+# restart working tunnels while health signals settle (journal window / tun skip).
+SETTLE_SEC="${TUNNEL_WATCHDOG_SETTLE_SEC:-600}"
+mkdir -p /run/tunnel-watchdog
+rm -f /run/tunnel-watchdog/fail.* 2>/dev/null || true
+echo $(($(date +%s) + SETTLE_SEC)) >/run/tunnel-watchdog/settle_until
+echo "==> Install settle ${SETTLE_SEC}s (no restarts); fail counters cleared"
+
 systemctl start tunnel-watchdog.service 2>/dev/null || true
 
 [[ -n "$TMP" ]] && rm -rf "$TMP"
 
 echo
-echo "Done (safe defaults: FAIL_THRESHOLD=5, COOLDOWN=300s, GRACE=300s)."
+echo "Done (safe defaults: FAIL_THRESHOLD=5, COOLDOWN=300s, GRACE=300s, SETTLE=${SETTLE_SEC}s)."
 echo "  tunnel-menu           # interactive menu"
 echo "  tunnel-menu status    # live health"
 echo "  config: $CONF"

@@ -48,6 +48,16 @@ in_grace() {
   (( age < GRACE_SEC ))
 }
 
+# After install/upgrade: do not restart tunnels for SETTLE_SEC (default 10 min)
+in_install_settle() {
+  local f now until
+  f="${STATE_DIR}/settle_until"
+  [[ -f "$f" ]] || return 1
+  until="$(cat "$f" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  (( now < until ))
+}
+
 is_ignored_unit() {
   local unit="$1"
   # Never touch web panels / non-tunnel helpers
@@ -57,6 +67,10 @@ is_ignored_unit() {
 
 do_restart() {
   local name="$1" unit="$2"
+  if in_install_settle; then
+    log "SKIP restart $name ($unit): install settle window"
+    return 0
+  fi
   if in_cooldown "$unit"; then
     log "SKIP restart $name ($unit): cooldown ${COOLDOWN_SEC}s"
     return 0
@@ -84,6 +98,11 @@ handle_result() {
   if [[ "$healthy" -eq 1 ]]; then
     clear_fails "$unit"
     log "OK: $name ($unit) check=$kind ${reason}"
+    return 0
+  fi
+
+  if in_install_settle; then
+    log "SETTLE: $name ($unit) unhealthy during install settle — not counting ($reason)"
     return 0
   fi
 

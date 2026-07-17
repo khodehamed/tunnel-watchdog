@@ -248,13 +248,17 @@ _cc_tun_skip_mark() {
 }
 
 # Client liveness (Backhaul/Backpack):
-#  1) Unrecovered journal failure → FAIL
-#  2) Recent "control channel established" → OK
-#  3) If toml has tun_name and iface is MISSING and there is NO recent success
-#     → FAIL even with many CF ESTAB (zombie pool). This is the main false-OK fix.
-#     After a successful session with no kernel TUN for ~90s, skip TUN for this
-#     process lifetime (some builds never create the iface).
-#  4) Else need ESTAB >= healthy_min (default 4) AND at least one fresh socket.
+#  Priority: a real ESTAB pool means OK. Do NOT FAIL a working tunnel just because
+#  journal has no recent "established" line or tun_name iface is missing (many
+#  builds never create a kernel TUN). That previously caused false FAIL + restarts.
+#
+#  FAIL when:
+#   - last relevant journal line is an unrecovered channel failure, OR
+#   - ESTAB < healthy_min (default 4) / no fresh sockets (zombie leftovers), OR
+#   - (optional) tun_name set, iface missing, ESTAB low, and no tun-skip yet
+#  OK when:
+#   - recent "control channel established", OR
+#   - ESTAB >= min AND at least one fresh socket (real pool)
 control_channel_ok() {
   local unit="$1" arg="$2"
   local cnt fresh last tun age
@@ -265,30 +269,29 @@ control_channel_ok() {
   tun="$(unit_tun_name "$unit")"
   age="$(unit_active_age_sec "$unit")"
 
-  # Last journal line in window is an unrecovered failure → dead
+  # Explicit unrecovered failure in journal window → dead
   if [[ -n "$last" ]] && _cc_is_failure "$last"; then
     return 1
   fi
 
   if [[ -n "$last" ]] && _cc_is_success "$last"; then
-    # Control is up. If tun_name is set but iface never appears, mark skip
-    # so we do not restart-loop after the journal window expires.
     if [[ -n "$tun" ]] && ! tun_iface_up "$tun" && [[ "${age:-0}" -ge 90 ]]; then
       _cc_tun_skip_mark "$unit"
     fi
     return 0
   fi
 
-  # No recent success in journal window.
-  # Missing TUN (when configured) means zombie CF ESTAB must NOT count as OK —
-  # unless this process already proved it never creates a kernel TUN.
-  if [[ -n "$tun" ]] && ! tun_iface_up "$tun" && ! _cc_tun_skip_active "$unit"; then
-    return 1
+  # Real connection pool → healthy (even with journal=none / missing TUN iface)
+  if [[ "${cnt:-0}" -ge "$_cc_min" && "${fresh:-0}" -ge 1 ]]; then
+    if [[ -n "$tun" ]] && ! tun_iface_up "$tun" && [[ "${age:-0}" -ge 90 ]]; then
+      _cc_tun_skip_mark "$unit"
+    fi
+    return 0
   fi
 
-  # Healthy pool: enough ESTAB and at least one recently active socket
-  if [[ "${cnt:-0}" -ge "$_cc_min" && "${fresh:-0}" -ge 1 ]]; then
-    return 0
+  # Low ESTAB: missing TUN (when configured) is extra evidence of death
+  if [[ -n "$tun" ]] && ! tun_iface_up "$tun" && ! _cc_tun_skip_active "$unit"; then
+    return 1
   fi
 
   return 1
