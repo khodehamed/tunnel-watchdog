@@ -11,8 +11,29 @@ source "$LIB"
 
 CONF="${TUNNEL_WATCHDOG_CONF:-/etc/tunnel-watchdog.conf}"
 
+# Reattach stdin/stdout/stderr to a real TTY (needed after curl|sudo bash).
+ensure_tty() {
+  local t=""
+  if [[ -t 0 && -t 1 ]]; then
+    return 0
+  fi
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    t="/dev/tty"
+  elif [[ -n "${SSH_TTY:-}" && -r "${SSH_TTY}" && -w "${SSH_TTY}" ]]; then
+    t="${SSH_TTY}"
+  fi
+  if [[ -z "$t" ]]; then
+    echo "Interactive menu needs a TTY." >&2
+    echo "Run from a real terminal: tunnel-menu" >&2
+    return 1
+  fi
+  exec <"$t" >"$t" 2>"$t"
+}
+
 pause() {
-  read -r -p "Press Enter to continue... " _
+  if ! read -r -p "Press Enter to continue... " _; then
+    echo
+  fi
 }
 
 print_header() {
@@ -356,11 +377,26 @@ cmd_discover() {
 }
 
 menu_loop() {
-  local choice
+  local choice count=0 offered_discover=0
   while true; do
     print_header
     cmd_status
     echo
+    count=0
+    while IFS= read -r _; do count=$((count + 1)); done < <(tw_list_entries)
+    if [[ "$count" -eq 0 && "$offered_discover" -eq 0 ]]; then
+      offered_discover=1
+      echo "No tunnels in config. Discover systemd tunnel units now? [Y/n]"
+      if ! read -r -p "> " choice; then
+        echo "Bye."
+        exit 0
+      fi
+      case "${choice:-Y}" in
+        n|N|no|NO) ;;
+        *) cmd_discover interactive; pause ;;
+      esac
+      continue
+    fi
     echo "1) Refresh status"
     echo "2) Add tunnel"
     echo "3) Remove tunnel"
@@ -371,7 +407,11 @@ menu_loop() {
     echo "8) Discover tunnels on this server"
     echo "0) Exit"
     echo
-    read -r -p "Choice: " choice
+    if ! read -r -p "Choice: " choice; then
+      echo
+      echo "Bye."
+      exit 0
+    fi
     case "$choice" in
       1) ;;
       2) cmd_add; pause ;;
@@ -420,6 +460,7 @@ main() {
       usage
       ;;
     "")
+      ensure_tty || exit 1
       menu_loop
       ;;
     *)

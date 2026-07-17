@@ -159,44 +159,30 @@ echo "  tunnel-menu           # interactive menu"
 echo "  tunnel-menu status    # live health"
 echo "  config: $CONF"
 echo
-tunnel-menu status 2>/dev/null || true
 
-# Open interactive menu after install.
-# curl|sudo bash: stdin is the script pipe (not a TTY); stdout is usually still the terminal.
-# Re-bind stdin from /dev/tty or SSH_TTY. Skip CI: TUNNEL_WATCHDOG_NO_MENU=1
+# Open interactive menu ONLY (do not end on `tunnel-menu status`).
+# curl|sudo bash has a pipe as stdin — bind all FDs to /dev/tty.
+# Skip CI/automation: TUNNEL_WATCHDOG_NO_MENU=1
 open_menu() {
   [[ "${TUNNEL_WATCHDOG_NO_MENU:-}" == "1" ]] && return 0
   command -v tunnel-menu >/dev/null 2>&1 || return 0
 
-  local tty_in=""
-  if [[ -r /dev/tty ]]; then
-    tty_in="/dev/tty"
-  elif [[ -n "${SSH_TTY:-}" && -r "${SSH_TTY}" ]]; then
-    tty_in="${SSH_TTY}"
-  fi
-
   echo "Opening tunnel-menu..."
 
-  # Best: stdin from real tty; keep stdout/stderr as-is when they are TTYs
-  if [[ -n "$tty_in" ]]; then
-    if [[ -t 1 ]]; then
-      tunnel-menu <"$tty_in" || true
-    elif [[ -w "$tty_in" ]]; then
-      tunnel-menu <"$tty_in" >"$tty_in" 2>"$tty_in" || true
-    else
-      tunnel-menu <"$tty_in" || true
-    fi
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    tunnel-menu </dev/tty >/dev/tty 2>/dev/tty || true
     return 0
   fi
-
-  # Already interactive (e.g. bash /tmp/tw-install.sh)
+  if [[ -n "${SSH_TTY:-}" && -r "${SSH_TTY}" && -w "${SSH_TTY}" ]]; then
+    tunnel-menu <"${SSH_TTY}" >"${SSH_TTY}" 2>"${SSH_TTY}" || true
+    return 0
+  fi
   if [[ -t 0 && -t 1 ]]; then
     tunnel-menu || true
     return 0
   fi
 
-  echo "Note: no TTY available to open the menu automatically."
-  echo "  Run: tunnel-menu"
+  echo "Note: no TTY — menu not opened. Run: tunnel-menu"
   echo "  Or: curl -fsSL ${RAW_BASE%/}/install.sh -o /tmp/tw-install.sh && sudo bash /tmp/tw-install.sh"
 }
 
