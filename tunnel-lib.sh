@@ -438,3 +438,80 @@ tw_write_tunnels_from_stdin() {
 tw_backup_conf() {
   cp -a "$CONF" "${CONF}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
 }
+
+# Ensure a minimal conf exists (for discover on fresh hosts)
+tw_ensure_conf() {
+  [[ -f "$CONF" ]] && return 0
+  {
+    echo "# Tunnel Watchdog — created by tunnel-menu discover"
+    echo "FAIL_THRESHOLD=5"
+    echo "COOLDOWN_SEC=300"
+    echo "GRACE_SEC=300"
+    echo "JOURNAL_LOOKBACK=15min"
+    echo 'CONTROL_JOURNAL_SINCE="3 min ago"'
+    echo
+    echo 'TUNNELS="'
+    echo '"'
+  } >"$CONF"
+  chmod 0644 "$CONF"
+}
+
+# Derive one conf line for a systemd unit, or empty if skipped/unsupported.
+# Prints: name|unit|kind|arg
+tw_guess_entry_for_unit() {
+  local u="$1"
+  local name conf port
+  [[ -z "$u" ]] && return 1
+  [[ "$u" == *.service ]] || u="${u}.service"
+  name="${u%.service}"
+
+  # skip junk
+  echo "$u" | grep -qiE 'watchdog|webui' && return 1
+  echo "$u" | grep -qiE 'backhaul|backpack' || return 1
+
+  if ! systemctl cat "$u" &>/dev/null; then
+    return 1
+  fi
+
+  conf="$(systemctl show "$u" -p ExecStart --value 2>/dev/null \
+    | grep -oE '\-c[[:space:]]+[^[:space:]]+' | awk '{print $2}' || true)"
+  port=""
+  if [[ -n "$conf" && -f "$conf" ]]; then
+    port="$(grep -E '^\s*remote_addr\s*=' "$conf" 2>/dev/null | head -1 | grep -oE '[0-9]+' | tail -1 || true)"
+    if [[ -z "$port" ]]; then
+      port="$(grep -E '^\s*bind_addr\s*=' "$conf" 2>/dev/null | head -1 | grep -oE '[0-9]+' | tail -1 || true)"
+    fi
+  fi
+
+  if [[ -n "$port" ]]; then
+    echo "${name}|${u}|control_channel|${port}:2"
+  else
+    echo "${name}|${u}|active|"
+  fi
+}
+
+# Scan /etc/systemd/system for backhaul/backpack tunnel units.
+# Prints candidate lines: name|unit|kind|arg
+tw_discover_candidates() {
+  local u entry
+  ls -1 /etc/systemd/system/*.service 2>/dev/null \
+    | xargs -n1 basename \
+    | grep -iE 'backhaul|backpack' \
+    | grep -viE 'watchdog|webui' \
+    | sort -u \
+    | while read -r u; do
+        entry="$(tw_guess_entry_for_unit "$u" || true)"
+        [[ -n "$entry" ]] && echo "$entry"
+      done
+}
+
+# True if unit already present in TUNNELS
+tw_unit_configured() {
+  local want="$1" entry
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    tw_parse_entry "$entry"
+    [[ "$_unit" == "$want" ]] && return 0
+  done < <(tw_list_entries 2>/dev/null || true)
+  return 1
+}

@@ -55,6 +55,13 @@ install -m 0644 "${SRC}/tunnel-watchdog.service" "${UNIT_DIR}/tunnel-watchdog.se
 install -m 0644 "${SRC}/tunnel-watchdog.timer" "${UNIT_DIR}/tunnel-watchdog.timer"
 
 auto_detect_tunnels() {
+  # Prefer shared discover logic once lib is installed
+  if [[ -f "${LIB_DIR}/tunnel-lib.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${LIB_DIR}/tunnel-lib.sh"
+    tw_discover_candidates
+    return
+  fi
   ls -1 /etc/systemd/system/*.service 2>/dev/null \
     | xargs -n1 basename \
     | grep -iE 'backhaul|backpack' \
@@ -73,7 +80,6 @@ auto_detect_tunnels() {
           fi
         fi
         if [[ -n "$port" ]]; then
-          # dead_below=2 — only restart when almost no ESTAB sockets remain
           echo "${name}|${u}|control_channel|${port}:2"
         else
           echo "${name}|${u}|active|"

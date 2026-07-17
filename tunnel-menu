@@ -252,6 +252,109 @@ cmd_timer_status() {
   systemctl list-timers tunnel-watchdog.timer --no-pager || true
 }
 
+# Discover backhaul/backpack units on this host.
+# Modes: interactive (default), auto (--yes), dry-run (--dry-run)
+cmd_discover() {
+  local mode="${1:-interactive}"
+  local candidates=() already=() missing=() entry u
+  local i yn added=0
+
+  tw_ensure_conf
+  tw_load_conf || return 1
+
+  mapfile -t candidates < <(tw_discover_candidates)
+  if [[ ${#candidates[@]} -eq 0 ]]; then
+    echo "No backhaul/backpack tunnel units found under /etc/systemd/system."
+    return 0
+  fi
+
+  for entry in "${candidates[@]}"; do
+    tw_parse_entry "$entry"
+    if tw_unit_configured "$_unit"; then
+      already+=("$entry")
+    else
+      missing+=("$entry")
+    fi
+  done
+
+  echo "Discover tunnels on this server"
+  echo "----------------------------------------"
+  echo "Already in config (${#already[@]}):"
+  if [[ ${#already[@]} -eq 0 ]]; then
+    echo "  (none)"
+  else
+    for entry in "${already[@]}"; do
+      tw_parse_entry "$entry"
+      echo "  [OK] $_name  ($_unit)  $_kind $_arg"
+    done
+  fi
+  echo
+  echo "New candidates (${#missing[@]}):"
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    echo "  (none — nothing to add)"
+    echo "----------------------------------------"
+    return 0
+  fi
+  i=0
+  for entry in "${missing[@]}"; do
+    i=$((i + 1))
+    tw_parse_entry "$entry"
+    echo "  $i) $_name"
+    echo "      unit=$_unit  check=$_kind  arg=${_arg:--}"
+  done
+  echo "----------------------------------------"
+
+  if [[ "$mode" == "dry-run" ]]; then
+    echo "Dry-run: would add ${#missing[@]} tunnel(s). No changes written."
+    return 0
+  fi
+
+  local to_add=()
+  if [[ "$mode" == "auto" || "$mode" == "yes" ]]; then
+    to_add=("${missing[@]}")
+  else
+    echo
+    echo "a) Add ALL new tunnels"
+    echo "i) Choose individually (y/n each)"
+    echo "0) Cancel"
+    read -r -p "Choice [a/i/0]: " yn
+    case "$yn" in
+      a|A)
+        to_add=("${missing[@]}")
+        ;;
+      i|I)
+        for entry in "${missing[@]}"; do
+          tw_parse_entry "$entry"
+          read -r -p "Add $_name ($_unit)? [y/N]: " yn
+          if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+            to_add+=("$entry")
+          fi
+        done
+        ;;
+      *)
+        echo "Cancelled."
+        return 0
+        ;;
+    esac
+  fi
+
+  if [[ ${#to_add[@]} -eq 0 ]]; then
+    echo "Nothing selected."
+    return 0
+  fi
+
+  tw_backup_conf
+  {
+    tw_list_entries
+    printf '%s\n' "${to_add[@]}"
+  } | tw_write_tunnels_from_stdin
+
+  added=${#to_add[@]}
+  echo "Added $added tunnel(s). Existing entries kept."
+  echo
+  cmd_status
+}
+
 menu_loop() {
   local choice
   while true; do
@@ -265,6 +368,7 @@ menu_loop() {
     echo "5) Restart tunnel"
     echo "6) Run watchdog once"
     echo "7) Timer status"
+    echo "8) Discover tunnels on this server"
     echo "0) Exit"
     echo
     read -r -p "Choice: " choice
@@ -276,6 +380,7 @@ menu_loop() {
       5) cmd_restart; pause ;;
       6) cmd_watchdog_once; pause ;;
       7) cmd_timer_status; pause ;;
+      8) cmd_discover interactive; pause ;;
       0|q|Q) echo "Bye."; exit 0 ;;
       *) echo "Invalid option"; sleep 1 ;;
     esac
@@ -286,9 +391,12 @@ usage() {
   cat <<EOF
 tunnel-menu - manage tunnel watchdog entries
 
-  tunnel-menu           interactive menu
-  tunnel-menu status    live status (non-interactive)
-  tunnel-menu help      this help
+  tunnel-menu              interactive menu
+  tunnel-menu status       live status
+  tunnel-menu discover     scan server and auto-add missing tunnels
+  tunnel-menu discover --dry-run
+                           show what would be added (no write)
+  tunnel-menu help         this help
 EOF
 }
 
@@ -296,6 +404,17 @@ main() {
   case "${1:-}" in
     status|--status|-s)
       cmd_status
+      ;;
+    discover|--discover)
+      case "${2:-}" in
+        --dry-run|-n) cmd_discover dry-run ;;
+        --yes|-y|"") cmd_discover auto ;;
+        *)
+          echo "Unknown discover flag: $2"
+          usage
+          exit 1
+          ;;
+      esac
       ;;
     help|-h|--help)
       usage
