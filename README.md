@@ -10,6 +10,15 @@ Checks real tunnel liveness (`control_channel`: ESTAB pool + recent journal), no
 curl -fsSL https://raw.githubusercontent.com/khodehamed/tunnel-watchdog/main/install.sh | sudo bash
 ```
 
+After a successful install, `tunnel-menu` opens automatically when a TTY is available.
+Skip with `TUNNEL_WATCHDOG_NO_MENU=1`.
+
+If the menu does not open (rare under `curl|sudo bash`), use the two-step form (keeps TTY):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/khodehamed/tunnel-watchdog/main/install.sh -o /tmp/tw-install.sh && sudo bash /tmp/tw-install.sh
+```
+
 ## After install
 
 ```bash
