@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Tunnel Watchdog every 1 minute
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+Unit=tunnel-watchdog.service
+
+[Install]
+WantedBy=timers.target

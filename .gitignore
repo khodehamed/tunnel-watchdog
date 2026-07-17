@@ -1,0 +1,8 @@
+# Local / secrets / deploy helpers — never publish
+_from_server/
+*.py
+ssh_out.txt
+tunnel-watchdog.conf
+tunnel-watchdog.conf.live
+*.bak
+.DS_Store

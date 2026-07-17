@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# Interactive English menu for tunnel-watchdog management.
+set -euo pipefail
+
+LIB="${TUNNEL_LIB:-/usr/local/lib/tunnel-watchdog/tunnel-lib.sh}"
+if [[ ! -f "$LIB" ]]; then
+  LIB="$(cd "$(dirname "$0")" && pwd)/tunnel-lib.sh"
+fi
+# shellcheck disable=SC1090
+source "$LIB"
+
+CONF="${TUNNEL_WATCHDOG_CONF:-/etc/tunnel-watchdog.conf}"
+
+pause() {
+  read -r -p "Press Enter to continue... " _
+}
+
+print_header() {
+  clear 2>/dev/null || true
+  echo "========================================"
+  echo "   Tunnel Watchdog Menu"
+  echo "========================================"
+  echo " Config: $CONF"
+  echo
+}
+
+# Live status dump (also used non-interactively: tunnel-menu status)
+cmd_status() {
+  local i=0 entry
+  echo "Live tunnel status ($(date '+%F %T'))"
+  echo "----------------------------------------"
+  printf "%-3s %-24s %-10s %s\n" "#" "Name" "Status" "Details"
+  echo "----------------------------------------"
+
+  if ! tw_load_conf; then
+    echo "Error: cannot read config"
+    return 1
+  fi
+
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    tw_parse_entry "$entry"
+    i=$((i + 1))
+    evaluate_tunnel "$_name" "$_unit" "$_kind" "$_arg" || true
+    printf "%-3s %-24s %-10s %s\n" "$i" "$_name" "$HEALTH_STATUS" "$HEALTH_REASON"
+    printf "    unit=%s  check=%s  arg=%s\n" "$_unit" "$_kind" "${_arg:--}"
+  done < <(tw_list_entries)
+
+  if [[ "$i" -eq 0 ]]; then
+    echo "(no tunnels in config)"
+  fi
+  echo "----------------------------------------"
+}
+
+pick_tunnel() {
+  # prints selected entry line to stdout; returns 1 if cancel
+  local entries=() i choice
+  mapfile -t entries < <(tw_list_entries)
+  if [[ ${#entries[@]} -eq 0 ]]; then
+    echo "No tunnels configured." >&2
+    return 1
+  fi
+  echo "Select tunnel:" >&2
+  for i in "${!entries[@]}"; do
+    tw_parse_entry "${entries[$i]}"
+    evaluate_tunnel "$_name" "$_unit" "$_kind" "$_arg" || true
+    printf "  %d) %s [%s]\n" "$((i + 1))" "$_name" "$HEALTH_STATUS" >&2
+  done
+  echo "  0) Cancel" >&2
+  read -r -p "Number: " choice
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+  [[ "$choice" -eq 0 ]] && return 1
+  [[ "$choice" -ge 1 && "$choice" -le ${#entries[@]} ]] || return 1
+  echo "${entries[$((choice - 1))]}"
+}
+
+prompt_check_type() {
+  echo "Health check type:" >&2
+  echo "  1) control_channel (recommended client: min ESTAB + journal control state)" >&2
+  echo "  2) remote_estab    (ESTAB count only; use port:min or proc:port:min)" >&2
+  echo "  3) tcp             (local TCP connect host:port)" >&2
+  echo "  4) port            (port is listening)" >&2
+  echo "  5) ping            (ping IP)" >&2
+  echo "  6) iface           (network interface up)" >&2
+  echo "  7) backhaul_full   (backhaul mapped ports)" >&2
+  echo "  8) active          (systemd active only)" >&2
+  read -r -p "Choice [1-8]: " c
+  case "$c" in
+    1) echo "control_channel" ;;
+    2) echo "remote_estab" ;;
+    3) echo "tcp" ;;
+    4) echo "port" ;;
+    5) echo "ping" ;;
+    6) echo "iface" ;;
+    7) echo "backhaul_full" ;;
+    8) echo "active" ;;
+    *) echo "control_channel" ;;
+  esac
+}
+
+prompt_arg_for_kind() {
+  local kind="$1"
+  case "$kind" in
+    control_channel|control_alive)
+      read -r -p "Arg (remote_port:min_estab e.g. 8080:4): " a
+      echo "$a"
+      ;;
+    remote_estab|client_estab)
+      read -r -p "Arg (port:min or proc:port:min e.g. 8080:4): " a
+      echo "$a"
+      ;;
+    tcp|port|listen)
+      read -r -p "Address (e.g. 127.0.0.1:8880): " a
+      echo "$a"
+      ;;
+    ping)
+      read -r -p "IP to ping: " a
+      echo "$a"
+      ;;
+    iface)
+      read -r -p "Interface name (e.g. wtun0): " a
+      echo "$a"
+      ;;
+    backhaul_full|backhaul_mapped|backhaul)
+      read -r -p "Mapped ports or toml path: " a
+      echo "$a"
+      ;;
+    active)
+      echo ""
+      ;;
+    *)
+      read -r -p "Check arg: " a
+      echo "$a"
+      ;;
+  esac
+}
+
+cmd_add() {
+  local name unit kind arg entry
+  tw_load_conf || return 1
+
+  read -r -p "Tunnel display name: " name
+  name="$(echo "$name" | xargs)"
+  [[ -n "$name" ]] || { echo "Name is empty."; return 1; }
+
+  read -r -p "systemd unit (e.g. backhaul-xxx.service): " unit
+  unit="$(echo "$unit" | xargs)"
+  [[ "$unit" == *.service ]] || unit="${unit}.service"
+  if ! systemctl cat "$unit" &>/dev/null; then
+    echo "Error: unit '$unit' not found."
+    return 1
+  fi
+
+  while IFS= read -r entry; do
+    tw_parse_entry "$entry"
+    if [[ "$_unit" == "$unit" ]]; then
+      echo "Error: unit already registered ($_name)."
+      return 1
+    fi
+  done < <(tw_list_entries)
+
+  kind="$(prompt_check_type)"
+  arg="$(prompt_arg_for_kind "$kind")"
+
+  echo
+  echo "Preview: ${name}|${unit}|${kind}|${arg}"
+  evaluate_tunnel "$name" "$unit" "$kind" "$arg" || true
+  echo "Live status: $HEALTH_STATUS - $HEALTH_REASON"
+  read -r -p "Save? [y/N]: " yn
+  [[ "$yn" == "y" || "$yn" == "Y" ]] || { echo "Cancelled."; return 0; }
+
+  tw_backup_conf
+  {
+    tw_list_entries
+    echo "${name}|${unit}|${kind}|${arg}"
+  } | tw_write_tunnels_from_stdin
+
+  echo "Added."
+}
+
+cmd_remove() {
+  local sel kept=()
+  tw_load_conf || return 1
+  sel="$(pick_tunnel)" || { echo "Cancelled."; return 0; }
+  tw_parse_entry "$sel"
+  read -r -p "Remove '$_name'? [y/N]: " yn
+  [[ "$yn" == "y" || "$yn" == "Y" ]] || { echo "Cancelled."; return 0; }
+
+  tw_backup_conf
+  while IFS= read -r entry; do
+    [[ "$entry" == "$sel" ]] && continue
+    kept+=("$entry")
+  done < <(tw_list_entries)
+
+  printf '%s\n' "${kept[@]:-}" | tw_write_tunnels_from_stdin
+  echo "Removed."
+}
+
+cmd_edit() {
+  local sel name unit kind arg
+  tw_load_conf || return 1
+  sel="$(pick_tunnel)" || { echo "Cancelled."; return 0; }
+  tw_parse_entry "$sel"
+  echo "Edit: $_name"
+  echo "Current unit: $_unit (unchanged)"
+  unit="$_unit"
+  name="$_name"
+  read -r -p "New name [${name}]: " n
+  [[ -n "${n// }" ]] && name="$(echo "$n" | xargs)"
+  kind="$(prompt_check_type)"
+  arg="$(prompt_arg_for_kind "$kind")"
+
+  evaluate_tunnel "$name" "$unit" "$kind" "$arg" || true
+  echo "Live status: $HEALTH_STATUS - $HEALTH_REASON"
+  read -r -p "Save? [y/N]: " yn
+  [[ "$yn" == "y" || "$yn" == "Y" ]] || { echo "Cancelled."; return 0; }
+
+  tw_backup_conf
+  {
+    while IFS= read -r entry; do
+      if [[ "$entry" == "$sel" ]]; then
+        echo "${name}|${unit}|${kind}|${arg}"
+      else
+        echo "$entry"
+      fi
+    done < <(tw_list_entries)
+  } | tw_write_tunnels_from_stdin
+  echo "Updated."
+}
+
+cmd_restart() {
+  local sel
+  tw_load_conf || return 1
+  sel="$(pick_tunnel)" || { echo "Cancelled."; return 0; }
+  tw_parse_entry "$sel"
+  echo "Restarting $_unit ..."
+  systemctl restart "$_unit"
+  sleep 2
+  evaluate_tunnel "$_name" "$_unit" "$_kind" "$_arg" || true
+  echo "Result: $HEALTH_STATUS - $HEALTH_REASON"
+}
+
+cmd_watchdog_once() {
+  echo "Running watchdog once..."
+  systemctl start tunnel-watchdog.service
+  journalctl -u tunnel-watchdog.service -n 30 --no-pager
+}
+
+cmd_timer_status() {
+  systemctl status tunnel-watchdog.timer --no-pager -l || true
+  echo
+  systemctl list-timers tunnel-watchdog.timer --no-pager || true
+}
+
+menu_loop() {
+  local choice
+  while true; do
+    print_header
+    cmd_status
+    echo
+    echo "1) Refresh status"
+    echo "2) Add tunnel"
+    echo "3) Remove tunnel"
+    echo "4) Edit health check"
+    echo "5) Restart tunnel"
+    echo "6) Run watchdog once"
+    echo "7) Timer status"
+    echo "0) Exit"
+    echo
+    read -r -p "Choice: " choice
+    case "$choice" in
+      1) ;;
+      2) cmd_add; pause ;;
+      3) cmd_remove; pause ;;
+      4) cmd_edit; pause ;;
+      5) cmd_restart; pause ;;
+      6) cmd_watchdog_once; pause ;;
+      7) cmd_timer_status; pause ;;
+      0|q|Q) echo "Bye."; exit 0 ;;
+      *) echo "Invalid option"; sleep 1 ;;
+    esac
+  done
+}
+
+usage() {
+  cat <<EOF
+tunnel-menu - manage tunnel watchdog entries
+
+  tunnel-menu           interactive menu
+  tunnel-menu status    live status (non-interactive)
+  tunnel-menu help      this help
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    status|--status|-s)
+      cmd_status
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    "")
+      menu_loop
+      ;;
+    *)
+      echo "Unknown option: $1"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

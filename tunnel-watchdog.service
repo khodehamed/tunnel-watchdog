@@ -1,0 +1,8 @@
+[Unit]
+Description=Tunnel Watchdog (one-shot check)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tunnel-watchdog.sh
+Nice=10
